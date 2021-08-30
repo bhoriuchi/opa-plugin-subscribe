@@ -11,16 +11,42 @@ import (
 )
 
 const (
-	PluginName    = "subscribe"
-	opConnect     = "connect"
-	opSubscribe   = "subscribe"
-	opUnsubscribe = "unsubscribe"
-	opDisconnect  = "disconnect"
+	PluginName                       = "subscribe"
+	opConnect                        = "connect"
+	opSubscribe                      = "subscribe"
+	opUnsubscribe                    = "unsubscribe"
+	opDisconnect                     = "disconnect"
+	NatsProvider  SubscriberProvider = "nats"
 )
 
+type SubscriberProvider string
+
+type SubscriberConfig struct {
+	name     string
+	Provider SubscriberProvider `yaml:"provider" json:"provider"`
+	Topic    string             `yaml:"topic" json:"topic"`
+	Plugin   string             `yaml:"plugin" json:"plugin"`
+	Config   interface{}        `yaml:"config" json:"config"`
+}
+
+// validate the provider
+func (c *SubscriberConfig) validate(name string) error {
+	if c.Provider == "" {
+		return fmt.Errorf("no subscriber provider specified for subscriber %s", name)
+	}
+	if c.Topic == "" {
+		return fmt.Errorf("no subscriber topic specified for subscriber %s", name)
+	}
+	if c.Plugin == "" {
+		return fmt.Errorf("no subscriber topic specified for subscriber %s", name)
+	}
+
+	return nil
+}
+
 type Config struct {
-	Nats        *NatsConfig `yaml:"nats" json:"nats"`
-	subscribers []Subscriber
+	Subscribers map[string]*SubscriberConfig `yaml:"subscribers" json:"subscribers"`
+	subscribers map[string]Subscriber
 }
 
 type Subscriber interface {
@@ -42,12 +68,26 @@ type Plugin struct {
 func (p *Plugin) Start(ctx context.Context) error {
 	p.manager.Logger().Debug("subscribe: starting plugin")
 	p.manager.UpdatePluginStatus(PluginName, &plugins.Status{State: plugins.StateOK})
-	p.config.subscribers = []Subscriber{}
+	p.config.subscribers = map[string]Subscriber{}
 
-	// set up subscribers
-	if p.config.Nats != nil {
-		p.config.Nats.manager = p.manager
-		p.config.subscribers = append(p.config.subscribers, p.config.Nats)
+	for name, s := range p.config.Subscribers {
+		s.name = name
+		if err := s.validate(name); err != nil {
+			return err
+		}
+
+		switch s.Provider {
+		case NatsProvider:
+			sub := &NatsSubscriber{}
+			if s.Config != nil {
+				if err := remarshal(s.Config, sub); err != nil {
+					return fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", name, err)
+				}
+			}
+			sub.manager = p.manager
+			sub.sc = s
+			p.config.subscribers[name] = sub
+		}
 	}
 
 	// connect and subscribe
@@ -82,6 +122,24 @@ func (p *Plugin) Reconfigure(ctx context.Context, config interface{}) {
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	p.config = config.(Config)
+}
+
+// perform an operation on all subscribers
+func (p *Plugin) op(ctx context.Context, name string) error {
+	for _, s := range p.config.subscribers {
+		switch name {
+		case opConnect:
+			return s.Connect(ctx)
+		case opSubscribe:
+			return s.Subscribe(ctx)
+		case opUnsubscribe:
+			return s.Unsubscribe(ctx)
+		case opDisconnect:
+			return s.Disconnect(ctx)
+		}
+	}
+
+	return nil
 }
 
 // New
@@ -129,20 +187,11 @@ func trigger(ctx context.Context, manager *plugins.Manager, name string) error {
 	return tr.Trigger(ctx)
 }
 
-// perform an operation on all subscribers
-func (p *Plugin) op(ctx context.Context, name string) error {
-	for _, s := range p.config.subscribers {
-		switch name {
-		case opConnect:
-			return s.Connect(ctx)
-		case opSubscribe:
-			return s.Subscribe(ctx)
-		case opUnsubscribe:
-			return s.Unsubscribe(ctx)
-		case opDisconnect:
-			return s.Disconnect(ctx)
-		}
+// hacky way to map one interface to another
+func remarshal(in, out interface{}) error {
+	b, err := json.Marshal(in)
+	if err != nil {
+		return err
 	}
-
-	return nil
+	return json.Unmarshal(b, out)
 }

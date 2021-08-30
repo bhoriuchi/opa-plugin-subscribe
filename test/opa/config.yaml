@@ -1,9 +1,13 @@
 plugins:
   subscribe:
-    nats:
-      url: nats://nats:4222
-      topic: bundle-update
-      plugin: bundle
+    subscribers:
+      nats:
+        provider: nats
+        topic: bundle-update
+        plugin: bundle
+        config:
+          url: nats://nats:4222
+
 
 services:
   nginx:
