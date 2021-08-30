@@ -1,0 +1,15 @@
+plugins:
+  subscribe:
+    nats:
+      url: nats://nats:4222
+      topic: bundle-update
+      plugin: bundle
+
+services:
+  nginx:
+    url: http://nginx
+
+bundles:
+  data:
+    service: nginx
+    resource: /bundle.tar.gz
