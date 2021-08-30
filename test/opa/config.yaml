@@ -6,8 +6,14 @@ plugins:
         topic: bundle-update
         plugin: bundle
         config:
-          url: nats://nats:4222
-
+          servers: nats://nats:4222
+      kafka:
+        provider: kafka
+        topic: bundle-update
+        plugin: bundle
+        config:
+          brokers:
+            - kafka:19092
 
 services:
   nginx:

@@ -17,6 +17,7 @@ const (
 	opUnsubscribe                    = "unsubscribe"
 	opDisconnect                     = "disconnect"
 	NatsProvider  SubscriberProvider = "nats"
+	KafkaProvider SubscriberProvider = "kafka"
 )
 
 type SubscriberProvider string
@@ -77,8 +78,21 @@ func (p *Plugin) Start(ctx context.Context) error {
 		}
 
 		switch s.Provider {
+		// nats provider
 		case NatsProvider:
 			sub := &NatsSubscriber{}
+			if s.Config != nil {
+				if err := remarshal(s.Config, sub); err != nil {
+					return fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", name, err)
+				}
+			}
+			sub.manager = p.manager
+			sub.sc = s
+			p.config.subscribers[name] = sub
+
+		// kafka provider
+		case KafkaProvider:
+			sub := &KafkaSubscriber{}
 			if s.Config != nil {
 				if err := remarshal(s.Config, sub); err != nil {
 					return fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", name, err)

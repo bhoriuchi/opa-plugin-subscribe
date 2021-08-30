@@ -2,7 +2,6 @@ package subscribe
 
 import (
 	"context"
-	"fmt"
 
 	"github.com/nats-io/nats.go"
 	"github.com/open-policy-agent/opa/plugins"
@@ -13,37 +12,29 @@ type NatsSubscriber struct {
 	sub          *nats.Subscription
 	manager      *plugins.Manager
 	sc           *SubscriberConfig
-	URL          string `yaml:"url" json:"url"`
+	Servers      string `yaml:"servers" json:"servers"`
 	MaxReconnect int    `yaml:"max_reconnect" json:"max_reconnect"`
 }
 
 // connects to nats server
 func (s *NatsSubscriber) Connect(ctx context.Context) error {
-	s.manager.Logger().Debug("subscribe: connecting to NATS server %s", s.URL)
+	s.manager.Logger().Debug("subscribe: connecting to NATS server(s) %s", s.Servers)
 	var err error
 
-	u := s.URL
-	if u == "" {
-		u = nats.DefaultURL
+	servers := s.Servers
+	if servers == "" {
+		servers = nats.DefaultURL
 	}
 
 	if s.MaxReconnect == 0 {
 		s.MaxReconnect = 5
 	}
 
-	if s.sc.Topic == "" {
-		return fmt.Errorf("no topic specified")
-	}
-
-	if s.sc.Plugin == "" {
-		return fmt.Errorf("no target plugin was specified")
-	}
-
 	opts := []nats.Option{
 		nats.MaxReconnects(s.MaxReconnect),
 	}
 
-	if s.conn, err = nats.Connect(u, opts...); err != nil {
+	if s.conn, err = nats.Connect(servers, opts...); err != nil {
 		return err
 	}
 
