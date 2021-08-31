@@ -1,8 +1,10 @@
 package kafka
 
 import (
+	"bytes"
 	"context"
 	"fmt"
+	"html/template"
 	"strings"
 
 	"github.com/Shopify/sarama"
@@ -14,6 +16,12 @@ import (
 
 const (
 	ProviderName = "kafka"
+)
+
+var (
+	funcMap template.FuncMap = map[string]interface{}{
+		"uuid": uuid.NewString,
+	}
 )
 
 func init() {
@@ -39,14 +47,15 @@ func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, 
 }
 
 type KafkaSubscriber struct {
-	manager     *plugins.Manager
-	log         logging.Logger
-	sc          *subscribe.SubscriberConfig
-	cg          sarama.ConsumerGroup
-	c           sarama.Client
-	Brokers     []string `yaml:"brokers" json:"brokers"`
-	GroupID     string   `yaml:"group_id" json:"group_id"`
-	DeleteGroup bool     `yaml:"delete_group" json:"delete_group"`
+	manager      *plugins.Manager
+	log          logging.Logger
+	sc           *subscribe.SubscriberConfig
+	cg           sarama.ConsumerGroup
+	c            sarama.Client
+	Brokers      []string `yaml:"brokers" json:"brokers"`
+	GroupID      string   `yaml:"group_id" json:"group_id"`
+	Version      string   `yaml:"version" json:"version"`
+	CleanupGroup bool     `yaml:"cleanup_group" json:"cleanup_group"`
 }
 
 // connects to nats server
@@ -57,13 +66,26 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 		return fmt.Errorf("no Kafka brokers specified")
 	}
 
-	s.log.Debug("connecting to Kafka brokers %q", s.Brokers)
+	s.log.Debug("connecting to Kafka broker(s) %s", strings.Join(s.Brokers, ", "))
 
 	clusterConfig := sarama.NewConfig()
+	if s.Version != "" {
+		clusterConfig.Version, err = sarama.ParseKafkaVersion(s.Version)
+		if err != nil {
+			return fmt.Errorf("invalid Kafka version %s: %s", s.Version, err)
+		}
+	}
+
 	// the oldest supported version is V0_10_2_0
 	if !clusterConfig.Version.IsAtLeast(sarama.V0_10_2_0) {
+		if s.Version != "" {
+			return fmt.Errorf("version %s was specified but does not support required features", s.Version)
+		}
+
 		clusterConfig.Version = sarama.V0_10_2_0
+		s.log.Debug("defaulting to Kafka version %s", clusterConfig.Version)
 	}
+
 	clusterConfig.Consumer.Return.Errors = true
 	clusterConfig.Consumer.Offsets.Initial = sarama.OffsetNewest
 	if s.c, err = sarama.NewClient(s.Brokers, clusterConfig); err != nil {
@@ -79,8 +101,9 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 	var err error
 
-	if s.GroupID == "" {
-		s.GroupID = uuid.New().String()
+	if err := s.ensureGroupID(); err != nil {
+		s.log.Error(err.Error())
+		return err
 	}
 
 	s.log.Debug("consumer group %s subscribing to %s", s.GroupID, s.sc.Topic)
@@ -140,7 +163,9 @@ func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
 	s.cg = nil
 	s.log.Debug("successfully closed consumer group %s", s.GroupID)
 
-	if s.DeleteGroup {
+	if s.CleanupGroup {
+		s.log.Debug("attempting to delete consumer group %s", s.GroupID)
+
 		ca, err := sarama.NewClusterAdminFromClient(s.c)
 		if err != nil {
 			s.log.Error("failed to create new Kafka cluster admin client interface: %s", err)
@@ -170,6 +195,31 @@ func (s *KafkaSubscriber) Disconnect(ctx context.Context) error {
 	}
 
 	s.c = nil
+	return nil
+}
+
+// gets the group ID. if specified will attempt to interpolate
+func (s *KafkaSubscriber) ensureGroupID() error {
+	if s.GroupID == "" {
+		s.GroupID = uuid.NewString()
+	}
+
+	buf := bytes.NewBuffer([]byte{})
+	tmpl, err := template.New("groupid").Funcs(funcMap).Parse(s.GroupID)
+	if err != nil {
+		return fmt.Errorf("failed to parse group_id %s: %s", s.GroupID, err)
+	}
+
+	if err := tmpl.Execute(buf, map[string]interface{}{}); err != nil {
+		return fmt.Errorf("failed to interpolate group_id %s: %s", s.GroupID, err)
+	}
+
+	groupID := buf.Bytes()
+	if len(buf.Bytes()) == 0 {
+		return fmt.Errorf("group_id %s was interpolated to an empty string", s.GroupID)
+	}
+
+	s.GroupID = string(groupID)
 	return nil
 }
 

@@ -6,14 +6,16 @@ plugins:
         topic: bundle-update
         plugin: bundle
         config:
-          servers: nats://nats:4222
+          servers:
+            - nats://nats:4222
       kafka:
         provider: kafka
         topic: bundle-update
         plugin: bundle
         config:
-          group_id: opa
-          delete_group: true
+          group_id: opa-{{uuid}}
+          cleanup_group: true
+          version: "2.7.0"
           brokers:
             - kafka:19092
 
