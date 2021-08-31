@@ -7,6 +7,11 @@ import (
 	"github.com/bhoriuchi/opa-plugin-subscribe/subscribe"
 	"github.com/open-policy-agent/opa/cmd"
 	"github.com/open-policy-agent/opa/runtime"
+
+	// import subscriber providers to make them available
+	// this limits code dependencies to only the subscribers you need
+	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/kafka"
+	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/nats"
 )
 
 func main() {

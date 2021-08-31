@@ -10,24 +10,36 @@ import (
 	"gopkg.in/yaml.v2"
 )
 
-const (
-	PluginName                       = "subscribe"
-	opConnect                        = "connect"
-	opSubscribe                      = "subscribe"
-	opUnsubscribe                    = "unsubscribe"
-	opDisconnect                     = "disconnect"
-	NatsProvider  SubscriberProvider = "nats"
-	KafkaProvider SubscriberProvider = "kafka"
+var (
+	SubscribePluginProviders = map[string]NewSubscriberFunc{}
 )
 
+const (
+	PluginName    = "subscribe"
+	opConnect     = "connect"
+	opSubscribe   = "subscribe"
+	opUnsubscribe = "unsubscribe"
+	opDisconnect  = "disconnect"
+)
+
+type NewSubscriberOptions struct {
+	Config  *SubscriberConfig
+	Manager *plugins.Manager
+}
+
+type NewSubscriberFunc func(opts *NewSubscriberOptions) (Subscriber, error)
 type SubscriberProvider string
 
 type SubscriberConfig struct {
 	name     string
-	Provider SubscriberProvider `yaml:"provider" json:"provider"`
-	Topic    string             `yaml:"topic" json:"topic"`
-	Plugin   string             `yaml:"plugin" json:"plugin"`
-	Config   interface{}        `yaml:"config" json:"config"`
+	Provider string      `yaml:"provider" json:"provider"`
+	Topic    string      `yaml:"topic" json:"topic"`
+	Plugin   string      `yaml:"plugin" json:"plugin"`
+	Config   interface{} `yaml:"config" json:"config"`
+}
+
+func (s *SubscriberConfig) GetName() string {
+	return s.name
 }
 
 // validate the provider
@@ -73,34 +85,21 @@ func (p *Plugin) Start(ctx context.Context) error {
 
 	for name, s := range p.config.Subscribers {
 		s.name = name
-		if err := s.validate(name); err != nil {
+		err := s.validate(name)
+		if err != nil {
 			return err
 		}
 
-		switch s.Provider {
-		// nats provider
-		case NatsProvider:
-			sub := &NatsSubscriber{}
-			if s.Config != nil {
-				if err := remarshal(s.Config, sub); err != nil {
-					return fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", name, err)
-				}
-			}
-			sub.manager = p.manager
-			sub.sc = s
-			p.config.subscribers[name] = sub
+		newFunc, ok := SubscribePluginProviders[s.Provider]
+		if !ok {
+			return fmt.Errorf("subscribe: provider type %s not registered", s.Provider)
+		}
 
-		// kafka provider
-		case KafkaProvider:
-			sub := &KafkaSubscriber{}
-			if s.Config != nil {
-				if err := remarshal(s.Config, sub); err != nil {
-					return fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", name, err)
-				}
-			}
-			sub.manager = p.manager
-			sub.sc = s
-			p.config.subscribers[name] = sub
+		if p.config.subscribers[name], err = newFunc(&NewSubscriberOptions{
+			Config:  s,
+			Manager: p.manager,
+		}); err != nil {
+			return err
 		}
 	}
 
@@ -143,13 +142,21 @@ func (p *Plugin) op(ctx context.Context, name string) error {
 	for _, s := range p.config.subscribers {
 		switch name {
 		case opConnect:
-			return s.Connect(ctx)
+			if err := s.Connect(ctx); err != nil {
+				return err
+			}
 		case opSubscribe:
-			return s.Subscribe(ctx)
+			if err := s.Subscribe(ctx); err != nil {
+				return err
+			}
 		case opUnsubscribe:
-			return s.Unsubscribe(ctx)
+			if err := s.Unsubscribe(ctx); err != nil {
+				return err
+			}
 		case opDisconnect:
-			return s.Disconnect(ctx)
+			if err := s.Disconnect(ctx); err != nil {
+				return err
+			}
 		}
 	}
 
@@ -187,7 +194,7 @@ func contains(list []string, val string) bool {
 }
 
 // triggers the named plugin
-func trigger(ctx context.Context, manager *plugins.Manager, name string) error {
+func Trigger(ctx context.Context, manager *plugins.Manager, name string) error {
 	if !contains(manager.Plugins(), name) {
 		return fmt.Errorf("plugin %q not found", name)
 	}
@@ -202,7 +209,7 @@ func trigger(ctx context.Context, manager *plugins.Manager, name string) error {
 }
 
 // hacky way to map one interface to another
-func remarshal(in, out interface{}) error {
+func Remarshal(in, out interface{}) error {
 	b, err := json.Marshal(in)
 	if err != nil {
 		return err

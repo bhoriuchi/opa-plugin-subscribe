@@ -12,6 +12,7 @@ plugins:
         topic: bundle-update
         plugin: bundle
         config:
+          group_id: opa
           brokers:
             - kafka:19092
 

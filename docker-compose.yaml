@@ -48,13 +48,15 @@ services:
     image: nginx
     volumes:
       - "./test/nginx:/usr/share/nginx/html"
+    ports:
+      - 8881:80
     networks:
       - dev
     environment:
       - NGINX_PORT=80
 
   # opa server
-  opa:
+  opa1:
     build: ./
     volumes:
       - "./test/opa/config.yaml:/app/config.yaml"
@@ -64,5 +66,16 @@ services:
       - "8181:8181"
     command: run --server -c /app/config.yaml --log-level debug
   
+  # opa server
+  opa2:
+    build: ./
+    volumes:
+      - "./test/opa/config.yaml:/app/config.yaml"
+    networks:
+      - dev
+    ports:
+      - "8182:8181"
+    command: run --server -c /app/config.yaml --log-level debug
+
 networks:
   dev:
