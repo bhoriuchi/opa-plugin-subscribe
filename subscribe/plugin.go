@@ -6,12 +6,16 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/plugins"
 	"gopkg.in/yaml.v2"
 )
 
 var (
 	SubscribePluginProviders = map[string]NewSubscriberFunc{}
+	subscribeLogFields       = map[string]interface{}{
+		"plugin": "subscribe",
+	}
 )
 
 const (
@@ -25,6 +29,7 @@ const (
 type NewSubscriberOptions struct {
 	Config  *SubscriberConfig
 	Manager *plugins.Manager
+	Logger  logging.Logger
 }
 
 type NewSubscriberFunc func(opts *NewSubscriberOptions) (Subscriber, error)
@@ -75,11 +80,14 @@ type Plugin struct {
 	manager *plugins.Manager
 	config  Config
 	mtx     sync.Mutex
+	log     logging.Logger
 }
 
 // Start
 func (p *Plugin) Start(ctx context.Context) error {
-	p.manager.Logger().Debug("subscribe: starting plugin")
+	p.log = p.manager.Logger().WithFields(subscribeLogFields)
+	p.log.Debug("starting plugin")
+
 	p.manager.UpdatePluginStatus(PluginName, &plugins.Status{State: plugins.StateOK})
 	p.config.subscribers = map[string]Subscriber{}
 
@@ -92,12 +100,13 @@ func (p *Plugin) Start(ctx context.Context) error {
 
 		newFunc, ok := SubscribePluginProviders[s.Provider]
 		if !ok {
-			return fmt.Errorf("subscribe: provider type %s not registered", s.Provider)
+			return fmt.Errorf("subscribe provider type %s not registered", s.Provider)
 		}
 
 		if p.config.subscribers[name], err = newFunc(&NewSubscriberOptions{
 			Config:  s,
 			Manager: p.manager,
+			Logger:  p.log,
 		}); err != nil {
 			return err
 		}
@@ -116,22 +125,22 @@ func (p *Plugin) Start(ctx context.Context) error {
 
 // Stop
 func (p *Plugin) Stop(ctx context.Context) {
-	p.manager.Logger().Debug("subscribe: stopping plugin")
+	p.log.Debug("stopping plugin")
 	p.manager.UpdatePluginStatus(PluginName, &plugins.Status{State: plugins.StateNotReady})
 
 	// unsubscribe and disconnect
 	if err := p.op(ctx, opUnsubscribe); err != nil {
-		p.manager.Logger().Error("subscribe: failed to unsubscribe: %s", err)
+		p.log.Error("failed to unsubscribe: %s", err)
 	}
 
 	if err := p.op(ctx, opDisconnect); err != nil {
-		p.manager.Logger().Error("subscribe: failed to disconnect: %s", err)
+		p.log.Error("failed to disconnect: %s", err)
 	}
 }
 
 // Reconfigure
 func (p *Plugin) Reconfigure(ctx context.Context, config interface{}) {
-	p.manager.Logger().Debug("subscribe: reconfiguring plugin")
+	p.log.Debug("reconfiguring plugin")
 	p.mtx.Lock()
 	defer p.mtx.Unlock()
 	p.config = config.(Config)
@@ -150,13 +159,11 @@ func (p *Plugin) op(ctx context.Context, name string) error {
 				return err
 			}
 		case opUnsubscribe:
-			if err := s.Unsubscribe(ctx); err != nil {
-				return err
-			}
+			// should not stop any other unsubscribe ops
+			s.Unsubscribe(ctx)
 		case opDisconnect:
-			if err := s.Disconnect(ctx); err != nil {
-				return err
-			}
+			// should not stop any other disconnect ops
+			s.Disconnect(ctx)
 		}
 	}
 

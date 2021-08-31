@@ -13,6 +13,7 @@ plugins:
         plugin: bundle
         config:
           group_id: opa
+          delete_group: true
           brokers:
             - kafka:19092
 
