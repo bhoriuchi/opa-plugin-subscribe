@@ -53,14 +53,16 @@ $ go build -o opa
 ```yaml
 plugins:
   subscribe:
-    subscribers:
-      nats_bundle:
-        provider: nats
+      kafka_bundle:
+        provider: kafka
         topic: bundle-update
         plugin: bundle
         config:
-          servers:
-            - nats://nats:4222
+          group_id: opa-{{uuid}}
+          cleanup_group: true
+          version: "2.7.0"
+          brokers:
+            - kafka:19092
 ```
 #### Publishing Kafka Events
 
@@ -77,16 +79,14 @@ $ echo test | kaf produce bundle-update
 ```yaml
 plugins:
   subscribe:
-      kafka_bundle:
-        provider: kafka
+    subscribers:
+      nats_bundle:
+        provider: nats
         topic: bundle-update
         plugin: bundle
         config:
-          group_id: opa-{{uuid}}
-          cleanup_group: true
-          version: "2.7.0"
-          brokers:
-            - kafka:19092
+          servers:
+            - nats://nats:4222
 ```
 #### Publishing NATS Events
 
