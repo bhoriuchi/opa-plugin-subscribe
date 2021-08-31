@@ -1,14 +1,14 @@
 plugins:
   subscribe:
     subscribers:
-      nats:
+      nats_bundle:
         provider: nats
         topic: bundle-update
         plugin: bundle
         config:
           servers:
             - nats://nats:4222
-      kafka:
+      kafka_bundle:
         provider: kafka
         topic: bundle-update
         plugin: bundle

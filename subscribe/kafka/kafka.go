@@ -30,19 +30,23 @@ func init() {
 
 func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
 	sub := &KafkaSubscriber{}
+	logger := opts.Logger.WithFields(map[string]interface{}{
+		"provider":   strings.ToUpper(ProviderName),
+		"subscriber": opts.Config.GetName(),
+		"topic":      opts.Config.Topic,
+	})
+
+	logger.Info("Creating new %s subscriber", ProviderName)
 
 	if opts.Config != nil {
 		if err := subscribe.Remarshal(opts.Config.Config, sub); err != nil {
-			return nil, fmt.Errorf("failed to parse Kafka configuration for subscriber %s: %s", opts.Config.GetName(), err)
+			return nil, fmt.Errorf("failed to parse Kafka configuration: %s", err)
 		}
 	}
 
 	sub.sc = opts.Config
 	sub.manager = opts.Manager
-	sub.log = opts.Logger.WithFields(map[string]interface{}{
-		"provider":   strings.ToUpper(ProviderName),
-		"subscriber": opts.Config.GetName(),
-	})
+	sub.log = logger
 	return sub, nil
 }
 
@@ -66,7 +70,7 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 		return fmt.Errorf("no Kafka brokers specified")
 	}
 
-	s.log.Debug("connecting to Kafka broker(s) %s", strings.Join(s.Brokers, ", "))
+	s.log.Info("Connecting to Kafka broker(s) %s", strings.Join(s.Brokers, ", "))
 
 	clusterConfig := sarama.NewConfig()
 	if s.Version != "" {
@@ -83,17 +87,17 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 		}
 
 		clusterConfig.Version = sarama.V0_10_2_0
-		s.log.Debug("defaulting to Kafka version %s", clusterConfig.Version)
+		s.log.Debug("Defaulting to Kafka version %s", clusterConfig.Version)
 	}
 
 	clusterConfig.Consumer.Return.Errors = true
 	clusterConfig.Consumer.Offsets.Initial = sarama.OffsetNewest
 	if s.c, err = sarama.NewClient(s.Brokers, clusterConfig); err != nil {
-		s.log.Error("error creating Kafka client: %s", err)
+		s.log.Error("Error creating Kafka client: %s", err)
 		return err
 	}
 
-	s.log.Debug("successfully connected Kafka client connection!")
+	s.log.Info("Successfully connected to Kafka brokers!")
 	return nil
 }
 
@@ -106,7 +110,12 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 		return err
 	}
 
-	s.log.Debug("consumer group %s subscribing to %s", s.GroupID, s.sc.Topic)
+	// add the group id to the logging fields
+	s.log = s.log.WithFields(map[string]interface{}{
+		"group_id": s.GroupID,
+	})
+
+	s.log.Info("Subscribing to topic")
 	if s.cg, err = sarama.NewConsumerGroupFromClient(s.GroupID, s.c); err != nil {
 		return err
 	}
@@ -126,75 +135,80 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 			select {
 			case err := <-s.cg.Errors():
 				if err != nil {
-					s.log.Error("consumer group error: %s", err)
+					s.log.Error("Consumer group error: %s", err)
 				}
 			default:
 				err := s.cg.Consume(sctx, topics, h)
 				switch err {
 				case sarama.ErrClosedConsumerGroup:
-					s.log.Debug("closed consumer group %s", s.GroupID)
+					s.log.Debug("Closed consumer group %s", s.GroupID)
 					return
 				case nil:
+					s.log.Debug("Message successfully received!")
 					continue
 				default:
-					s.log.Error("consume error: %s", err)
+					s.log.Error("Consume error: %s", err)
 				}
 			}
 		}
 	}()
 
+	s.log.Info("Successfully subscribed to topic!")
 	return nil
 }
 
 // unsubscribe from bundle updates
 func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
-	s.log.Debug("unsubscribing consumer group %s from topic %s", s.GroupID, s.sc.Topic)
+	s.log.Info("Unsubscribing from topic %s")
 
 	if s.cg == nil {
-		s.log.Warn("attempted to close consumer group %s, but it does not exist", s.GroupID)
+		s.log.Warn("Attempted to close consumer group, but it does not exist")
 		return nil
 	}
 
 	if err := s.cg.Close(); err != nil {
-		s.log.Error("failed to close consumer group %s", s.GroupID)
+		s.log.Error("Failed to close consumer group: %s", err)
 		return err
 	}
 
 	s.cg = nil
-	s.log.Debug("successfully closed consumer group %s", s.GroupID)
+	s.log.Debug("Successfully closed consumer group!")
 
 	if s.CleanupGroup {
-		s.log.Debug("attempting to delete consumer group %s", s.GroupID)
+		s.log.Debug("Attempting to delete consumer group")
 
 		ca, err := sarama.NewClusterAdminFromClient(s.c)
 		if err != nil {
-			s.log.Error("failed to create new Kafka cluster admin client interface: %s", err)
+			s.log.Error("Failed to create new Kafka cluster admin client interface: %s", err)
 		}
 
 		if err := ca.DeleteConsumerGroup(s.GroupID); err != nil {
-			s.log.Error("failed to delete consumer group %s: %s", s.GroupID, err)
+			s.log.Error("Failed to delete consumer group: %s", err)
 			return err
 		}
+		s.log.Debug("Successfully deleted consumer group!")
 	}
 
+	s.log.Info("Successfully unsubscribed from topic!", s.sc.Topic)
 	return nil
 }
 
 // disconnect from nats server
 func (s *KafkaSubscriber) Disconnect(ctx context.Context) error {
-	s.log.Debug("closing client connection")
+	s.log.Info("Closing client connection")
 
 	if s.c == nil {
-		s.log.Warn("attempted to close client connection, but it does not exist")
+		s.log.Warn("Attempted to close client connection, but it does not exist")
 		return nil
 	}
 
 	if err := s.c.Close(); err != nil {
-		s.log.Error("failed to close client: %s", err)
+		s.log.Error("Failed to close client: %s", err)
 		return err
 	}
 
 	s.c = nil
+	s.log.Info("Successfully closed client connection!")
 	return nil
 }
 
@@ -238,7 +252,7 @@ func (h *consumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, cl
 		if err := subscribe.Trigger(context.Background(), h.manager, h.plugin); err == nil {
 			sess.MarkMessage(msg, "")
 		} else {
-			h.log.Error("failed to trigger plugin update: %s", err)
+			h.log.Error("Failed to trigger plugin update: %s", err)
 		}
 	}
 	return nil

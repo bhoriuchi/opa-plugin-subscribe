@@ -22,19 +22,23 @@ func init() {
 // create a new subscriber
 func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
 	sub := &NatsSubscriber{}
+	logger := opts.Logger.WithFields(map[string]interface{}{
+		"provider":   strings.ToUpper(ProviderName),
+		"subscriber": opts.Config.GetName(),
+		"topic":      opts.Config.Topic,
+	})
+
+	logger.Info("Creating new %s subscriber", ProviderName)
 
 	if opts.Config != nil {
 		if err := subscribe.Remarshal(opts.Config.Config, sub); err != nil {
-			return nil, fmt.Errorf("failed to parse NATS configuration for subscriber %s: %s", opts.Config.GetName(), err)
+			return nil, fmt.Errorf("failed to parse configuration: %s", err)
 		}
 	}
 
 	sub.sc = opts.Config
 	sub.manager = opts.Manager
-	sub.log = opts.Logger.WithFields(map[string]interface{}{
-		"provider":   strings.ToUpper(ProviderName),
-		"subscriber": opts.Config.GetName(),
-	})
+	sub.log = logger
 	return sub, nil
 }
 
@@ -57,7 +61,7 @@ func (s *NatsSubscriber) Connect(ctx context.Context) error {
 
 	serverList := strings.Join(servers, ", ")
 
-	s.log.Debug("connecting to NATS server(s) %s", serverList)
+	s.log.Info("Connecting to server(s) %s", serverList)
 	var err error
 
 	if s.MaxReconnect == 0 {
@@ -69,11 +73,11 @@ func (s *NatsSubscriber) Connect(ctx context.Context) error {
 	}
 
 	if s.conn, err = natspkg.Connect(serverList, opts...); err != nil {
-		s.log.Error("failed to connect to NATS server(s): %s", err)
+		s.log.Error("Failed to connect to server(s): %s", err)
 		return err
 	}
 
-	s.log.Debug("connected to NATS server(s)!")
+	s.log.Info("Successfully connected to server(s)!")
 	return nil
 }
 
@@ -81,49 +85,52 @@ func (s *NatsSubscriber) Connect(ctx context.Context) error {
 func (s *NatsSubscriber) Subscribe(ctx context.Context) error {
 	var err error
 
-	s.log.Debug("subscribing to NATS topic %s", s.sc.Topic)
+	s.log.Info("Subscribing to topic")
 	s.sub, err = s.conn.Subscribe(s.sc.Topic, func(m *natspkg.Msg) {
-		s.log.Debug("nats message received on topic %q", s.sc.Topic)
+		s.log.Debug("Message successfully received!")
 		if err := subscribe.Trigger(context.Background(), s.manager, s.sc.Plugin); err != nil {
-			s.log.Error("failed to trigger plugin update: %s", err)
+			s.log.Error("Failed to trigger plugin update: %s", err)
 		}
 	})
 
+	s.log.Info("Successfully subscribed to topic!")
 	return err
 }
 
 // unsubscribe from bundle updates
 func (s *NatsSubscriber) Unsubscribe(ctx context.Context) error {
-	s.log.Debug("unsubscribing from topic %s", s.sc.Topic)
+	s.log.Info("Unsubscribing from topic")
 
 	if s.sub == nil {
-		s.log.Warn("attempted to unsubscribe from topic %s, but it does not exist", s.sc.Topic)
+		s.log.Warn("Attempted to unsubscribe from topic, but it does not exist")
 		return nil
 	}
 
 	if err := s.sub.Unsubscribe(); err != nil {
-		s.log.Error("failed to unsubscribe from topic %s: %s", s.sc.Topic, err)
+		s.log.Error("Failed to unsubscribe from topic: %s", err)
 		return err
 	}
 
 	s.sub = nil
+	s.log.Info("Successfully unsubscribed from topic!")
 	return nil
 }
 
 // disconnect from nats server
 func (s *NatsSubscriber) Disconnect(ctx context.Context) error {
-	s.log.Debug("draining NATS server connection(s)")
+	s.log.Info("Draining server connection(s)")
 
 	if s.conn == nil {
-		s.log.Warn("attempted to drain server connection(s), but a connection did not exist")
+		s.log.Warn("Attempted to drain server connection(s), but a connection did not exist")
 		return nil
 	}
 
 	if err := s.conn.Drain(); err != nil {
-		s.log.Error("failed to drain NATS server connection(s): %s", err)
+		s.log.Error("Failed to drain server connection(s): %s", err)
 		return err
 	}
 
 	s.conn = nil
+	s.log.Info("Successfully drained server connection(s)!")
 	return nil
 }
