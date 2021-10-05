@@ -10,6 +10,7 @@ import (
 
 	// import subscriber providers to make them available
 	// this limits code dependencies to only the subscribers you need
+	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/consul"
 	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/kafka"
 	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/nats"
 )

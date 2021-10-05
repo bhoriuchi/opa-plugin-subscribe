@@ -1,6 +1,13 @@
 plugins:
   subscribe:
     subscribers:
+      consul_bundle:
+        provider: consul
+        topic: bundle-update
+        plugin: bundle
+        config:
+          address: http://consul:8500
+
       nats_bundle:
         provider: nats
         topic: bundle-update
@@ -8,6 +15,7 @@ plugins:
         config:
           servers:
             - nats://nats:4222
+
       kafka_bundle:
         provider: kafka
         topic: bundle-update

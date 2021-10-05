@@ -7,6 +7,7 @@ import (
 
 	"github.com/bhoriuchi/opa-plugin-subscribe/subscribe"
 	natspkg "github.com/nats-io/nats.go"
+	"github.com/oleiade/lane"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/plugins"
 )
@@ -15,46 +16,57 @@ const (
 	ProviderName = "nats"
 )
 
+// register the provider
 func init() {
 	subscribe.SubscribePluginProviders[ProviderName] = NewSubscriber
 }
 
-// create a new subscriber
-func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
-	sub := &NatsSubscriber{}
-	logger := opts.Logger.WithFields(map[string]interface{}{
-		"provider":   strings.ToUpper(ProviderName),
-		"subscriber": opts.Config.GetName(),
-		"topic":      opts.Config.Topic,
-	})
-
-	logger.Info("Creating new %s subscriber", ProviderName)
-
-	if opts.Config != nil {
-		if err := subscribe.Remarshal(opts.Config.Config, sub); err != nil {
-			return nil, fmt.Errorf("failed to parse configuration: %s", err)
-		}
-	}
-
-	sub.sc = opts.Config
-	sub.manager = opts.Manager
-	sub.log = logger
-	return sub, nil
+// Subscriber implements the subscriber interface for nats
+type Subscriber struct {
+	conn    *natspkg.Conn
+	sub     *natspkg.Subscription
+	manager *plugins.Manager
+	log     logging.Logger
+	sc      *subscribe.SubscriberConfig
+	dq      *lane.Deque
+	config  *Config
 }
 
-type NatsSubscriber struct {
-	conn         *natspkg.Conn
-	sub          *natspkg.Subscription
-	manager      *plugins.Manager
-	log          logging.Logger
-	sc           *subscribe.SubscriberConfig
+// Config provides configuration information to nats client
+type Config struct {
 	Servers      []string `yaml:"servers" json:"servers"`
 	MaxReconnect int      `yaml:"max_reconnect" json:"max_reconnect"`
 }
 
-// connects to nats server
-func (s *NatsSubscriber) Connect(ctx context.Context) error {
-	servers := s.Servers
+// NewSubscriber create a new subscriber
+func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
+	s := &Subscriber{
+		sc:      opts.Config,
+		manager: opts.Manager,
+		config:  &Config{},
+		log: opts.Logger.WithFields(map[string]interface{}{
+			"provider":   strings.ToUpper(ProviderName),
+			"subscriber": opts.Config.GetName(),
+			"topic":      opts.Config.Topic,
+		}),
+	}
+
+	s.log.Info("Creating new %s subscriber", ProviderName)
+
+	if opts.Config == nil {
+		return nil, fmt.Errorf("no configuration was specified")
+	}
+
+	if err := subscribe.Remarshal(opts.Config.Config, s.config); err != nil {
+		return nil, fmt.Errorf("failed to parse configuration: %s", err)
+	}
+
+	return s, nil
+}
+
+// Connect connects to nats server
+func (s *Subscriber) Connect(ctx context.Context) error {
+	servers := s.config.Servers
 	if len(servers) == 0 {
 		servers = []string{natspkg.DefaultURL}
 	}
@@ -64,12 +76,12 @@ func (s *NatsSubscriber) Connect(ctx context.Context) error {
 	s.log.Info("Connecting to server(s) %s", serverList)
 	var err error
 
-	if s.MaxReconnect == 0 {
-		s.MaxReconnect = 5
+	if s.config.MaxReconnect == 0 {
+		s.config.MaxReconnect = 5
 	}
 
 	opts := []natspkg.Option{
-		natspkg.MaxReconnects(s.MaxReconnect),
+		natspkg.MaxReconnects(s.config.MaxReconnect),
 	}
 
 	if s.conn, err = natspkg.Connect(serverList, opts...); err != nil {
@@ -81,14 +93,18 @@ func (s *NatsSubscriber) Connect(ctx context.Context) error {
 	return nil
 }
 
-// subscribe to bundle updates
-func (s *NatsSubscriber) Subscribe(ctx context.Context) error {
+// Subscribe subscribes to bundle updates
+func (s *Subscriber) Subscribe(ctx context.Context) error {
 	var err error
 
 	s.log.Info("Subscribing to topic")
 	s.sub, err = s.conn.Subscribe(s.sc.Topic, func(m *natspkg.Msg) {
 		s.log.Debug("Message successfully received!")
-		if err := subscribe.Trigger(context.Background(), s.manager, s.sc.Plugin); err != nil {
+		if err := subscribe.Trigger(context.Background(), &subscribe.TriggerOptions{
+			Name:    s.sc.Plugin,
+			Manager: s.manager,
+			DQ:      s.dq,
+		}); err != nil {
 			s.log.Error("Failed to trigger plugin update: %s", err)
 		}
 	})
@@ -97,8 +113,8 @@ func (s *NatsSubscriber) Subscribe(ctx context.Context) error {
 	return err
 }
 
-// unsubscribe from bundle updates
-func (s *NatsSubscriber) Unsubscribe(ctx context.Context) error {
+// Unsubscribe unsubscribes from bundle updates
+func (s *Subscriber) Unsubscribe(ctx context.Context) error {
 	s.log.Info("Unsubscribing from topic")
 
 	if s.sub == nil {
@@ -116,8 +132,8 @@ func (s *NatsSubscriber) Unsubscribe(ctx context.Context) error {
 	return nil
 }
 
-// disconnect from nats server
-func (s *NatsSubscriber) Disconnect(ctx context.Context) error {
+// Disconnect disconnects from nats server
+func (s *Subscriber) Disconnect(ctx context.Context) error {
 	s.log.Info("Draining server connection(s)")
 
 	if s.conn == nil {
