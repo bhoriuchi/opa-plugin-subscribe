@@ -16,7 +16,7 @@ const (
 	ProviderName = "consul"
 )
 
-// register consul subscriber
+// register provider
 func init() {
 	subscribe.SubscribePluginProviders[ProviderName] = NewSubscriber
 }
@@ -37,27 +37,23 @@ func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, 
 	s := &Subscriber{
 		sc:      opts.Config,
 		manager: opts.Manager,
-		log:     opts.Logger,
 		config:  &ConsulConfig{},
 		dq:      lane.NewCappedDeque(1),
+		log: opts.Logger.WithFields(map[string]interface{}{
+			"provider":   strings.ToUpper(ProviderName),
+			"subscriber": opts.Config.GetName(),
+			"topic":      opts.Config.Topic,
+		}),
 	}
 
-	logger := opts.Logger.WithFields(map[string]interface{}{
-		"provider":   strings.ToUpper(ProviderName),
-		"subscriber": opts.Config.GetName(),
-		"topic":      opts.Config.Topic,
-	})
+	s.log.Info("Creating new %s subscriber", ProviderName)
 
-	logger.Info("Creating new %s subscriber", ProviderName)
-
-	if s.config == nil {
+	if opts.Config == nil {
 		return nil, fmt.Errorf("no configuration was specified")
 	}
 
-	if opts.Config != nil {
-		if err := subscribe.Remarshal(opts.Config.Config, s.config); err != nil {
-			return nil, fmt.Errorf("failed to parse configuration: %s", err)
-		}
+	if err := subscribe.Remarshal(opts.Config.Config, s.config); err != nil {
+		return nil, fmt.Errorf("failed to parse configuration: %s", err)
 	}
 
 	return s, nil
@@ -94,14 +90,14 @@ func (s *Subscriber) Subscribe(ctx context.Context) (err error) {
 		"type": s.config.WatchType,
 	}
 
-	// generate params
+	// generate params. empty watcher type defaults to event
 	switch s.config.WatchType {
 	case "key":
 		params["key"] = s.sc.Topic
-	case "keyprefix", "":
-		params["type"] = "keyprefix"
+	case "keyprefix":
 		params["prefix"] = s.sc.Topic
-	case "event":
+	case "event", "":
+		params["type"] = "event"
 		params["name"] = s.sc.Topic
 	default:
 		err = fmt.Errorf("unsupported watch type %q", s.config.WatchType)
@@ -114,7 +110,13 @@ func (s *Subscriber) Subscribe(ctx context.Context) (err error) {
 
 	s.wp.HybridHandler = func(bv watch.BlockingParamVal, data interface{}) {
 		s.log.Debug("Received a message")
-		s.trigger()
+		if err := subscribe.Trigger(context.Background(), &subscribe.TriggerOptions{
+			Name:    s.sc.Plugin,
+			Manager: s.manager,
+			DQ:      s.dq,
+		}); err != nil {
+			s.log.Error("Failed to trigger plugin update: %s", err)
+		}
 	}
 
 	go func() {
@@ -141,7 +143,7 @@ func (s *Subscriber) Unsubscribe(ctx context.Context) (err error) {
 	return nil
 }
 
-// disconnect from nats server
+// Disconnect disconnect from nats server
 func (s *Subscriber) Disconnect(ctx context.Context) (err error) {
 	s.log.Info("Disconnecting")
 	if s.client == nil {
@@ -152,14 +154,4 @@ func (s *Subscriber) Disconnect(ctx context.Context) (err error) {
 	s.Unsubscribe(ctx)
 	s.log.Info("Successfully disconnected!")
 	return
-}
-
-// triggers an update with at most 1 queued up trigger
-func (s *Subscriber) trigger() error {
-	return subscribe.Enqueue(s.dq, "", func(id interface{}, args ...interface{}) error {
-		if err := subscribe.Trigger(context.Background(), s.manager, s.sc.Plugin); err != nil {
-			s.log.Error("Failed to trigger plugin update: %s", err)
-		}
-		return nil
-	})
 }

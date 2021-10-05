@@ -10,6 +10,7 @@ import (
 	"github.com/Shopify/sarama"
 	"github.com/bhoriuchi/opa-plugin-subscribe/subscribe"
 	"github.com/google/uuid"
+	"github.com/oleiade/lane"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/plugins"
 )
@@ -24,66 +25,78 @@ var (
 	}
 )
 
+// register the provider
 func init() {
 	subscribe.SubscribePluginProviders[ProviderName] = NewSubscriber
 }
 
-func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
-	sub := &KafkaSubscriber{}
-	logger := opts.Logger.WithFields(map[string]interface{}{
-		"provider":   strings.ToUpper(ProviderName),
-		"subscriber": opts.Config.GetName(),
-		"topic":      opts.Config.Topic,
-	})
-
-	logger.Info("Creating new %s subscriber", ProviderName)
-
-	if opts.Config != nil {
-		if err := subscribe.Remarshal(opts.Config.Config, sub); err != nil {
-			return nil, fmt.Errorf("failed to parse Kafka configuration: %s", err)
-		}
-	}
-
-	sub.sc = opts.Config
-	sub.manager = opts.Manager
-	sub.log = logger
-	return sub, nil
+// Subscriber implements the Subscriber interface for kafka
+type Subscriber struct {
+	manager *plugins.Manager
+	log     logging.Logger
+	sc      *subscribe.SubscriberConfig
+	cg      sarama.ConsumerGroup
+	c       sarama.Client
+	dq      *lane.Deque
+	config  *Config
 }
 
-type KafkaSubscriber struct {
-	manager      *plugins.Manager
-	log          logging.Logger
-	sc           *subscribe.SubscriberConfig
-	cg           sarama.ConsumerGroup
-	c            sarama.Client
+// Config provides configuration to the subscriber
+type Config struct {
 	Brokers      []string `yaml:"brokers" json:"brokers"`
 	GroupID      string   `yaml:"group_id" json:"group_id"`
 	Version      string   `yaml:"version" json:"version"`
 	CleanupGroup bool     `yaml:"cleanup_group" json:"cleanup_group"`
 }
 
-// connects to nats server
-func (s *KafkaSubscriber) Connect(ctx context.Context) error {
+// NewSubscriber creates a new kafka subscriber
+func NewSubscriber(opts *subscribe.NewSubscriberOptions) (subscribe.Subscriber, error) {
+	s := &Subscriber{
+		sc:      opts.Config,
+		manager: opts.Manager,
+		config:  &Config{},
+		log: opts.Logger.WithFields(map[string]interface{}{
+			"provider":   strings.ToUpper(ProviderName),
+			"subscriber": opts.Config.GetName(),
+			"topic":      opts.Config.Topic,
+		}),
+	}
+
+	s.log.Info("Creating new %s subscriber", ProviderName)
+
+	if opts.Config == nil {
+		return nil, fmt.Errorf("no configuration was specified")
+	}
+
+	if err := subscribe.Remarshal(opts.Config.Config, s.config); err != nil {
+		return nil, fmt.Errorf("failed to parse Kafka configuration: %s", err)
+	}
+
+	return s, nil
+}
+
+// Connect connects to kafka
+func (s *Subscriber) Connect(ctx context.Context) error {
 	var err error
 
-	if len(s.Brokers) == 0 {
+	if len(s.config.Brokers) == 0 {
 		return fmt.Errorf("no Kafka brokers specified")
 	}
 
-	s.log.Info("Connecting to Kafka broker(s) %s", strings.Join(s.Brokers, ", "))
+	s.log.Info("Connecting to Kafka broker(s) %s", strings.Join(s.config.Brokers, ", "))
 
 	clusterConfig := sarama.NewConfig()
-	if s.Version != "" {
-		clusterConfig.Version, err = sarama.ParseKafkaVersion(s.Version)
+	if s.config.Version != "" {
+		clusterConfig.Version, err = sarama.ParseKafkaVersion(s.config.Version)
 		if err != nil {
-			return fmt.Errorf("invalid Kafka version %s: %s", s.Version, err)
+			return fmt.Errorf("invalid Kafka version %s: %s", s.config.Version, err)
 		}
 	}
 
 	// the oldest supported version is V0_10_2_0
 	if !clusterConfig.Version.IsAtLeast(sarama.V0_10_2_0) {
-		if s.Version != "" {
-			return fmt.Errorf("version %s was specified but does not support required features", s.Version)
+		if s.config.Version != "" {
+			return fmt.Errorf("version %s was specified but does not support required features", s.config.Version)
 		}
 
 		clusterConfig.Version = sarama.V0_10_2_0
@@ -92,7 +105,7 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 
 	clusterConfig.Consumer.Return.Errors = true
 	clusterConfig.Consumer.Offsets.Initial = sarama.OffsetNewest
-	if s.c, err = sarama.NewClient(s.Brokers, clusterConfig); err != nil {
+	if s.c, err = sarama.NewClient(s.config.Brokers, clusterConfig); err != nil {
 		s.log.Error("Error creating Kafka client: %s", err)
 		return err
 	}
@@ -101,8 +114,8 @@ func (s *KafkaSubscriber) Connect(ctx context.Context) error {
 	return nil
 }
 
-// subscribe to bundle updates
-func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
+// Subscribe subscribes to bundle updates
+func (s *Subscriber) Subscribe(ctx context.Context) error {
 	var err error
 
 	if err := s.ensureGroupID(); err != nil {
@@ -112,11 +125,11 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 
 	// add the group id to the logging fields
 	s.log = s.log.WithFields(map[string]interface{}{
-		"group_id": s.GroupID,
+		"group_id": s.config.GroupID,
 	})
 
 	s.log.Info("Subscribing to topic")
-	if s.cg, err = sarama.NewConsumerGroupFromClient(s.GroupID, s.c); err != nil {
+	if s.cg, err = sarama.NewConsumerGroupFromClient(s.config.GroupID, s.c); err != nil {
 		return err
 	}
 
@@ -125,6 +138,7 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 		manager: s.manager,
 		log:     s.log,
 		plugin:  s.sc.Plugin,
+		dq:      s.dq,
 	}
 
 	sctx := context.Background()
@@ -141,7 +155,7 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 				err := s.cg.Consume(sctx, topics, h)
 				switch err {
 				case sarama.ErrClosedConsumerGroup:
-					s.log.Debug("Closed consumer group %s", s.GroupID)
+					s.log.Debug("Closed consumer group %s", s.config.GroupID)
 					return
 				case nil:
 					s.log.Debug("Message successfully received!")
@@ -157,8 +171,8 @@ func (s *KafkaSubscriber) Subscribe(ctx context.Context) error {
 	return nil
 }
 
-// unsubscribe from bundle updates
-func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
+// Unsubscribe unsubscribes from bundle updates
+func (s *Subscriber) Unsubscribe(ctx context.Context) error {
 	s.log.Info("Unsubscribing from topic %s")
 
 	if s.cg == nil {
@@ -174,7 +188,7 @@ func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
 	s.cg = nil
 	s.log.Debug("Successfully closed consumer group!")
 
-	if s.CleanupGroup {
+	if s.config.CleanupGroup {
 		s.log.Debug("Attempting to delete consumer group")
 
 		ca, err := sarama.NewClusterAdminFromClient(s.c)
@@ -182,7 +196,7 @@ func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
 			s.log.Error("Failed to create new Kafka cluster admin client interface: %s", err)
 		}
 
-		if err := ca.DeleteConsumerGroup(s.GroupID); err != nil {
+		if err := ca.DeleteConsumerGroup(s.config.GroupID); err != nil {
 			s.log.Error("Failed to delete consumer group: %s", err)
 			return err
 		}
@@ -193,8 +207,8 @@ func (s *KafkaSubscriber) Unsubscribe(ctx context.Context) error {
 	return nil
 }
 
-// disconnect from nats server
-func (s *KafkaSubscriber) Disconnect(ctx context.Context) error {
+// Disconnect disconnects from kafka
+func (s *Subscriber) Disconnect(ctx context.Context) error {
 	s.log.Info("Closing client connection")
 
 	if s.c == nil {
@@ -212,44 +226,49 @@ func (s *KafkaSubscriber) Disconnect(ctx context.Context) error {
 	return nil
 }
 
-// gets the group ID. if specified will attempt to interpolate
-func (s *KafkaSubscriber) ensureGroupID() error {
-	if s.GroupID == "" {
-		s.GroupID = uuid.NewString()
+// ensureGroupID gets the group ID. if specified will attempt to interpolate
+func (s *Subscriber) ensureGroupID() error {
+	if s.config.GroupID == "" {
+		s.config.GroupID = uuid.NewString()
 	}
 
 	buf := bytes.NewBuffer([]byte{})
-	tmpl, err := template.New("groupid").Funcs(funcMap).Parse(s.GroupID)
+	tmpl, err := template.New("groupid").Funcs(funcMap).Parse(s.config.GroupID)
 	if err != nil {
-		return fmt.Errorf("failed to parse group_id %s: %s", s.GroupID, err)
+		return fmt.Errorf("failed to parse group_id %s: %s", s.config.GroupID, err)
 	}
 
 	if err := tmpl.Execute(buf, map[string]interface{}{}); err != nil {
-		return fmt.Errorf("failed to interpolate group_id %s: %s", s.GroupID, err)
+		return fmt.Errorf("failed to interpolate group_id %s: %s", s.config.GroupID, err)
 	}
 
 	groupID := buf.Bytes()
 	if len(buf.Bytes()) == 0 {
-		return fmt.Errorf("group_id %s was interpolated to an empty string", s.GroupID)
+		return fmt.Errorf("group_id %s was interpolated to an empty string", s.config.GroupID)
 	}
 
-	s.GroupID = string(groupID)
+	s.config.GroupID = string(groupID)
 	return nil
 }
 
-// consumer handler
+// consumerGroupHandler handles messages
 type consumerGroupHandler struct {
 	plugin  string
 	manager *plugins.Manager
 	log     logging.Logger
 	cg      sarama.ConsumerGroup
+	dq      *lane.Deque
 }
 
 func (*consumerGroupHandler) Setup(_ sarama.ConsumerGroupSession) error   { return nil }
 func (*consumerGroupHandler) Cleanup(_ sarama.ConsumerGroupSession) error { return nil }
 func (h *consumerGroupHandler) ConsumeClaim(sess sarama.ConsumerGroupSession, claim sarama.ConsumerGroupClaim) error {
 	for msg := range claim.Messages() {
-		if err := subscribe.Trigger(context.Background(), h.manager, h.plugin); err == nil {
+		if err := subscribe.Trigger(context.Background(), &subscribe.TriggerOptions{
+			Name:    h.plugin,
+			Manager: h.manager,
+			DQ:      h.dq,
+		}); err == nil {
 			sess.MarkMessage(msg, "")
 		} else {
 			h.log.Error("Failed to trigger plugin update: %s", err)

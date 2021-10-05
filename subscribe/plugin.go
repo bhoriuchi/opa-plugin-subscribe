@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 
+	"github.com/oleiade/lane"
 	"github.com/open-policy-agent/opa/logging"
 	"github.com/open-policy-agent/opa/plugins"
 	"gopkg.in/yaml.v2"
@@ -200,19 +201,27 @@ func contains(list []string, val string) bool {
 	return false
 }
 
+type TriggerOptions struct {
+	Manager *plugins.Manager
+	Name    string
+	DQ      *lane.Deque
+}
+
 // triggers the named plugin
-func Trigger(ctx context.Context, manager *plugins.Manager, name string) error {
-	if !contains(manager.Plugins(), name) {
-		return fmt.Errorf("plugin %q not found", name)
+func Trigger(ctx context.Context, opts *TriggerOptions) error {
+	if !contains(opts.Manager.Plugins(), opts.Name) {
+		return fmt.Errorf("plugin %q not found", opts.Name)
 	}
 
-	p := manager.Plugin(name)
+	p := opts.Manager.Plugin(opts.Name)
 	tr, ok := p.(plugins.Triggerable)
 	if !ok {
-		return fmt.Errorf("plugin %q is not triggerable", name)
+		return fmt.Errorf("plugin %q is not triggerable", opts.Name)
 	}
 
-	return tr.Trigger(ctx)
+	return Enqueue(opts.DQ, "", func(id interface{}, args ...interface{}) error {
+		return tr.Trigger(ctx)
+	})
 }
 
 // hacky way to map one interface to another

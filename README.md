@@ -24,6 +24,7 @@ import (
 
 	// import subscriber providers to make them available
 	// this limits code dependencies to only the subscribers you need
+  _ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/consul"
 	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/kafka"
 	_ "github.com/bhoriuchi/opa-plugin-subscribe/subscribe/nats"
 )
@@ -94,4 +95,30 @@ Using the [NATS CLI](https://github.com/nats-io/natscli)
 
 ```sh
 $ nats pub bundle-update test
+```
+
+### Consul
+
+#### Consul Config Example
+
+```yaml
+plugins:
+  subscribe:
+    subscribers:
+      consul_bundle:
+        provider: consul
+        topic: bundle-update
+        plugin: bundle
+        config:
+          address: http://consul:8500
+```
+#### Publishing Consul Events
+
+Using the [Fire Event API](https://www.consul.io/api-docs/event#fire-event)
+
+```sh
+$ curl \
+    --request PUT \
+    --data @payload \
+    http://consul:8500/v1/event/fire/bundle-update
 ```
